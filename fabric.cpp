@@ -1,3 +1,5 @@
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
 #include <mitsuba/render/bsdf.h>
 #include <mitsuba/render/fresnel.h>
 #include <mitsuba/render/ior.h>
@@ -6,13 +8,14 @@
 NAMESPACE_BEGIN(mitsuba)
 
 template <typename Float, typename Spectrum>
-class Fabric final : public BSDF<Float, Spectrum> {
+class Fabric final : public BSDF<Float, Spectrum>
+{
 public:
     MI_IMPORT_BASE(BSDF, m_flags, m_components)
     MI_IMPORT_TYPES(Texture)
 
-    Fabric(const Properties &props) : Base(props) {
-
+    Fabric(const Properties &props) : Base(props)
+    {
         // Specifies the internal index of refraction at the interface
         ScalarFloat int_ior = lookup_ior(props, "int_ior", "bk7");
 
@@ -42,7 +45,216 @@ public:
         dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
+    Spectrum compute_visibility(const Vector3f &omega, const float &k,
+                                float light_frequency)
+    {
+        float high_frequency_threshold = 0.0f;
+        if (light_frequency > high_frequency_threshold)
+        {
+            // High frequency light
+            return compute_ssdf(omega, k);
+        }
+        else
+        {
+            // Low frequency light
+            return compute_sg(omega, k);
+        }
+    }
+
+    Eigen::MatrixXf pcaCompressSSDF(const Eigen::MatrixXf &ssdf,
+                                    int numComponents)
+    {
+        // Convert SSDF to floating point for PCA
+        Eigen::MatrixXf ssdfFloat = ssdf.cast<float>();
+
+        // Step 1: Normalize by subtracting the mean
+        Eigen::VectorXf mean = ssdfFloat.colwise().mean();
+        Eigen::MatrixXf ssdfCentered = ssdfFloat.rowwise() - mean.transpose();
+
+        // Step 2: Compute the covariance matrix
+        Eigen::MatrixXf covarianceMatrix =
+            (ssdfCentered.adjoint() * ssdfCentered) /
+            double(ssdfFloat.rows() - 1);
+
+        // Step 3: Compute eigenvalues and eigenvectors of the covariance matrix
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXf> eigenSolver(
+            covarianceMatrix);
+        if (eigenSolver.info() != Eigen::Success)
+            abort(); // Handle failure
+
+        // Step 4: Sort eigenvectors by eigenvalues (in descending order)
+        Eigen::MatrixXf eigenvectors = eigenSolver.eigenvectors();
+        // This step assumes eigenvectors are already sorted by eigenvalues in
+        // descending order
+
+        // Step 5: Pick the top 'numComponents' eigenvectors
+        Eigen::MatrixXf principalComponents =
+            eigenvectors.rightCols(numComponents);
+
+        // Step 6: Transform the original centered data
+        Eigen::MatrixXf transformedData = ssdfCentered * principalComponents;
+
+        // Return the transformed data in integer form (if necessary, adjust
+        // based on your needs)
+        return transformedData;
+    }
+
+    int
+    computeDistanceToNearestOcclusion(int x, int y,
+                                      const Eigen::MatrixXi &visibilityImage)
+    {
+        // Placeholder for distance computation. You might implement a search
+        // algorithm here that looks for the nearest pixel with a different
+        // visibility value. For simplicity, let's assume a naive approach:
+        int shortestDistance = INT_MAX; // Use a large initial value
+
+        // Scan through the entire image (this can be highly inefficient and is
+        // just illustrative)
+        for (int i = 0; i < visibilityImage.rows(); ++i)
+        {
+            for (int j = 0; j < visibilityImage.cols(); ++j)
+            {
+                if (visibilityImage(i, j) == 0)
+                { // Found an occluded pixel
+                    int distance =
+                        std::sqrt(std::pow(x - i, 2) + std::pow(y - j, 2));
+                    if (distance < shortestDistance)
+                    {
+                        shortestDistance = distance;
+                    }
+                }
+            }
+        }
+
+        return shortestDistance;
+    }
+
+    int computeOccludedDistance(int x, int y,
+                                const Eigen::MatrixXi &visibilityImage)
+    {
+        x = x + 1;
+        y = y + 1;
+        static_cast<void>(visibilityImage);
+
+        return -1; // Example placeholder value
+    }
+
+    Eigen::MatrixXi
+    computeSSDFFromVisibilityImage(const Eigen::MatrixXi &visibilityImage)
+    {
+        int rows = visibilityImage.rows();
+        int cols = visibilityImage.cols();
+        Eigen::MatrixXi ssdf =
+            Eigen::MatrixXi::Zero(rows, cols); // Initialize SSDF matrix
+
+        // Loop through each pixel in the visibility image
+        for (int i = 0; i < rows; ++i)
+        {
+            for (int j = 0; j < cols; ++j)
+            {
+                if (visibilityImage(i, j) == 1)
+                {
+                    // For visible pixels, compute the distance to the nearest
+                    // occluded pixel
+                    int distance = computeDistanceToNearestOcclusion(
+                        i, j, visibilityImage);
+                    ssdf(i, j) = distance;
+                }
+                else
+                {
+                    // For occluded pixels, you might want to use a different
+                    // method to compute the SSDF value, possibly involving
+                    // negative distances or another marker
+                    ssdf(i, j) = computeOccludedDistance(i, j, visibilityImage);
+                }
+            }
+        }
+
+        return ssdf;
+    }
+
+    Spectrum convertToSpectrum(const Eigen::MatrixXf &compressedSSDF)
+    {
+        double sum = compressedSSDF.sum();
+        double maxPossibleValue =
+            compressedSSDF.size() * 255.0; // Assuming 255 as the max SSDF value
+        double normalizedSum = sum / maxPossibleValue;
+
+        // Assuming Spectrum can be constructed from a single scalar value,
+        // or you have a way to convert a scalar value to Spectrum.
+        Spectrum spectrumValue =
+            normalizedSum; // Make sure Spectrum can be initialized like this
+
+        return spectrumValue;
+    }
+
+    Spectrum compute_ssdf(const Vector3f &omega, const float &k)
+    {
+        // Step 1: Locate the nearest copy of the exemplar block
+        // This step is conceptual and depends on your scene setup
+        static_cast<void>(omega);
+        static_cast<void>(k);
+        // Step 2: Render a 128x128 binary visibility image
+        Eigen::MatrixXi visibility_image(128, 128);
+        // Assuming you have a method to perform ray casting and determine
+        // visibility This will require iterating over the sphere's
+        // parameterization (theta, phi) and casting rays to determine
+        // visibility
+        for (int theta_idx = 0; theta_idx < 128; ++theta_idx)
+        {
+            for (int phi_idx = 0; phi_idx < 128; ++phi_idx)
+            {
+                // Compute theta and phi for the current pixel
+                // Cast a ray in this direction and determine visibility
+                bool visible =
+                    true /* Perform ray casting to check visibility */;
+                visibility_image(theta_idx, phi_idx) = visible ? 1 : 0;
+            }
+        }
+
+        // Step 3: Compute the SSDF from the visibility image
+        // This involves finding for each pixel the closest pixel having the
+        // opposite value and could be implemented as a separate function
+        Eigen::MatrixXi ssdf = computeSSDFFromVisibilityImage(visibility_image);
+
+        // Step 4: Compress the SSDF using PCA
+        // Assuming you have a PCA implementation or a library like Eigen that
+        // can perform PCA The number of principal components to retain is
+        // mentioned as 48 in the paper
+        // Change the declaration of compressed_ssdf to Eigen::MatrixXf
+        Eigen::MatrixXf compressed_ssdf =
+            pcaCompressSSDF(ssdf.cast<float>(), 48);
+
+        // Convert the compressed SSDF into a format usable by your rendering
+        // system This could involve mapping the PCA components to a spectrum,
+        Spectrum ssdf_spectrum = convertToSpectrum(compressed_ssdf);
+
+        return ssdf_spectrum;
+    }
+
+    Spectrum compute_sg(const Vector3f &omega, const float &k)
+    {
+        // SG axis - This should be based on the fabric's micro-geometry and
+        // light interaction For simplicity, using a placeholder axis. You'll
+        // need to compute this based on your fabric model.
+        Vector3f sg_axis = Vector3f(0.0f, 1.0f, 0.0f);
+        static_cast<void>(k);
+        // SG sharpness - This value should be determined based on the light's
+        // interaction with the fabric Using a placeholder value. Adjust this
+        // based on your specific requirements.
+        float sg_sharpness = 100.0f;
+
+        // Compute the SG contribution using the formula G(omega; xi, lambda) =
+        // exp(lambda(omega . xi - 1)) Assuming 'omega' is normalized and
+        // 'sg_axis' is the direction of SG (xi in the formula)
+        auto dot_product = dot(omega, sg_axis);
+        Spectrum sg_contribution = exp(sg_sharpness * (dot_product - 1.0f));
+
+        return sg_contribution;
+    }
+
+    void traverse(TraversalCallback *callback) override
+    {
         callback->put_parameter("eta", m_eta, +ParamFlags::NonDifferentiable);
         if (m_specular_reflectance)
             callback->put_object("specular_reflectance",
@@ -58,10 +270,11 @@ public:
                                              const SurfaceInteraction3f &si,
                                              Float sample1,
                                              const Point2f & /* sample2 */,
-                                             Mask active) const override {
+                                             Mask active) const override
+    {
         MI_MASKED_FUNCTION(ProfilerPhase::BSDFSample, active);
 
-        bool has_reflection   = ctx.is_enabled(BSDFFlags::DeltaReflection, 0),
+        bool has_reflection = ctx.is_enabled(BSDFFlags::DeltaReflection, 0),
              has_transmission = ctx.is_enabled(BSDFFlags::DeltaTransmission, 1);
 
         // Evaluate the Fresnel equations for unpolarized illumination
@@ -74,15 +287,21 @@ public:
         // Lobe selection
         BSDFSample3f bs = dr::zeros<BSDFSample3f>();
         Mask selected_r;
-        if (likely(has_reflection && has_transmission)) {
+        if (likely(has_reflection && has_transmission))
+        {
             selected_r = sample1 <= r_i && active;
-            bs.pdf     = dr::detach(dr::select(selected_r, r_i, t_i));
-        } else {
-            if (has_reflection || has_transmission) {
+            bs.pdf = dr::detach(dr::select(selected_r, r_i, t_i));
+        }
+        else
+        {
+            if (has_reflection || has_transmission)
+            {
                 selected_r = Mask(has_reflection) && active;
-                bs.pdf     = 1.f;
-            } else {
-                return { bs, 0.f };
+                bs.pdf = 1.f;
+            }
+            else
+            {
+                return {bs, 0.f};
             }
         }
         Mask selected_t = !selected_r && active;
@@ -104,7 +323,8 @@ public:
             transmittance = m_specular_transmittance->eval(si, selected_t);
 
         Spectrum weight(0.f);
-        if constexpr (is_polarized_v<Spectrum>) {
+        if constexpr (is_polarized_v<Spectrum>)
+        {
             /* Due to the coordinate system rotations for polarization-aware
                pBSDFs below we need to know the propagation direction of light.
                In the following, light arrives along `-wo_hat` and leaves along
@@ -116,16 +336,19 @@ public:
 
             /* BSDF weights are Mueller matrices now. */
             Float cos_theta_o_hat = Frame3f::cos_theta(wo_hat);
-            Spectrum R            = mueller::specular_reflection(
+            Spectrum R = mueller::specular_reflection(
                          UnpolarizedSpectrum(cos_theta_o_hat),
                          UnpolarizedSpectrum(m_eta)),
                      T = mueller::specular_transmission(
                          UnpolarizedSpectrum(cos_theta_o_hat),
                          UnpolarizedSpectrum(m_eta));
 
-            if (likely(has_reflection && has_transmission)) {
+            if (likely(has_reflection && has_transmission))
+            {
                 weight = dr::select(selected_r, R, T) / bs.pdf;
-            } else if (has_reflection || has_transmission) {
+            }
+            else if (has_reflection || has_transmission)
+            {
                 weight = has_reflection ? R : T;
                 bs.pdf = 1.f;
             }
@@ -133,15 +356,15 @@ public:
             /* The Stokes reference frame vector of this matrix lies
                perpendicular to the plane of reflection. */
             Vector3f n(0, 0, 1);
-            Vector3f s_axis_in  = dr::cross(n, -wo_hat);
+            Vector3f s_axis_in = dr::cross(n, -wo_hat);
             Vector3f s_axis_out = dr::cross(n, wi_hat);
 
             // Singularity when the input & output are collinear with the normal
             Mask collinear = dr::all(dr::eq(s_axis_in, Vector3f(0)));
-            s_axis_in      = dr::select(collinear, Vector3f(1, 0, 0),
-                                        dr::normalize(s_axis_in));
-            s_axis_out     = dr::select(collinear, Vector3f(1, 0, 0),
-                                        dr::normalize(s_axis_out));
+            s_axis_in = dr::select(collinear, Vector3f(1, 0, 0),
+                                   dr::normalize(s_axis_in));
+            s_axis_out = dr::select(collinear, Vector3f(1, 0, 0),
+                                    dr::normalize(s_axis_out));
 
             /* Rotate in/out reference vector of `weight` s.t. it aligns with
                the implicit Stokes bases of -wo_hat & wi_hat. */
@@ -154,15 +377,19 @@ public:
 
             if (dr::any_or<true>(selected_t))
                 weight[selected_t] *= mueller::absorber(transmittance);
-
-        } else {
-            if (likely(has_reflection && has_transmission)) {
+        }
+        else
+        {
+            if (likely(has_reflection && has_transmission))
+            {
                 weight = 1.f;
                 /* For differentiable variants, lobe choice has to be detached
                    to avoid bias. Sampling weights should be computed
                    accordingly. */
-                if constexpr (dr::is_diff_v<Float>) {
-                    if (dr::grad_enabled(r_i)) {
+                if constexpr (dr::is_diff_v<Float>)
+                {
+                    if (dr::grad_enabled(r_i))
+                    {
                         Float r_diff =
                             dr::replace_grad(Float(1.f), r_i / dr::detach(r_i));
                         Float t_diff =
@@ -170,7 +397,9 @@ public:
                         weight = dr::select(selected_r, r_diff, t_diff);
                     }
                 }
-            } else if (has_reflection || has_transmission) {
+            }
+            else if (has_reflection || has_transmission)
+            {
                 weight = has_reflection ? r_i : t_i;
             }
 
@@ -181,7 +410,8 @@ public:
                 weight[selected_t] *= transmittance;
         }
 
-        if (dr::any_or<true>(selected_t)) {
+        if (dr::any_or<true>(selected_t))
+        {
             /* For transmission, radiance must be scaled to account for the
                solid angle compression that occurs when crossing the interface.
              */
@@ -190,32 +420,49 @@ public:
             weight[selected_t] *= dr::sqr(factor);
         }
 
-        return { bs, weight & active };
+        return {bs, weight & active};
     }
 
     Spectrum eval(const BSDFContext & /* ctx */,
                   const SurfaceInteraction3f & /* si */,
-                  const Vector3f & /* wo */, Mask /* active */) const override {
+                  const Vector3f & /* wo */, Mask /* active */) const override
+    {
         return 0.f;
     }
 
     Float pdf(const BSDFContext & /* ctx */,
               const SurfaceInteraction3f & /* si */, const Vector3f & /* wo */,
-              Mask /* active */) const override {
+              Mask /* active */) const override
+    {
         return 0.f;
     }
 
-    std::string to_string() const override {
+    // Function to compute indirect illumination contribution using IIRTF
+    Spectrum computeIIRTFIndirectContribution(const SurfaceInteraction3f &si,
+                                              const Vector3f &wo) const
+    {
+        static_cast<void>(si);
+        static_cast<void>(wo);
+        // Placeholder for IIRTF computation logic
+        // This will depend on how you've precomputed and stored the IIRTF data
+        // For simplicity, this example assumes a generic approach
+
+        // Example: Retrieve IIRTF data based on the surface interaction details
+        // (e.g., position, normal) and the outgoing direction 'wo'
+
+        // This is highly simplified and would need to be replaced with actual
+        // IIRTF data retrieval and application logic
+        Spectrum iirtfContribution = Spectrum(0.0f);
+
+        return iirtfContribution;
+    }
+
+    std::string to_string() const override
+    {
         std::ostringstream oss;
-        oss << "SmoothDielectric[" << std::endl;
-        if (m_specular_reflectance)
-            oss << "  specular_reflectance = "
-                << string::indent(m_specular_reflectance) << "," << std::endl;
-        if (m_specular_transmittance)
-            oss << "  specular_transmittance = "
-                << string::indent(m_specular_transmittance) << ", "
-                << std::endl;
-        oss << "  eta = " << m_eta << "," << std::endl << "]";
+        oss << "CustomFabirc[" << std::endl;
+        oss << "  eta = " << m_eta << "," << std::endl
+            << "]";
         return oss.str();
     }
 
