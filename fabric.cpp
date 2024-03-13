@@ -1,5 +1,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
+#include <mitsuba/core/plugin.h>
+#include <mitsuba/core/properties.h>
+#include <mitsuba/core/warp.h>
 #include <mitsuba/render/bsdf.h>
 #include <mitsuba/render/fresnel.h>
 #include <mitsuba/render/ior.h>
@@ -17,10 +20,10 @@ public:
     Fabric(const Properties &props) : Base(props)
     {
         // Specifies the internal index of refraction at the interface
-        ScalarFloat int_ior = lookup_ior(props, "int_ior", "bk7");
+        ScalarFloat int_ior = lookup_ior(props, "theta", "bk7");
 
         // Specifies the external index of refraction at the interface
-        ScalarFloat ext_ior = lookup_ior(props, "ext_ior", "air");
+        ScalarFloat ext_ior = lookup_ior(props, "gamma", "air");
 
         if (int_ior < 0 || ext_ior < 0)
             Throw("The interior and exterior indices of refraction must"
@@ -67,35 +70,34 @@ public:
         // Convert SSDF to floating point for PCA
         Eigen::MatrixXf ssdfFloat = ssdf.cast<float>();
 
-        // Step 1: Normalize by subtracting the mean
+        // Normalize by subtracting the mean
         Eigen::VectorXf mean = ssdfFloat.colwise().mean();
         Eigen::MatrixXf ssdfCentered = ssdfFloat.rowwise() - mean.transpose();
 
-        // Step 2: Compute the covariance matrix
+        // Compute the covariance matrix
         Eigen::MatrixXf covarianceMatrix =
             (ssdfCentered.adjoint() * ssdfCentered) /
             double(ssdfFloat.rows() - 1);
 
-        // Step 3: Compute eigenvalues and eigenvectors of the covariance matrix
+        // Compute eigenvalues and eigenvectors of the covariance matrix
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXf> eigenSolver(
             covarianceMatrix);
         if (eigenSolver.info() != Eigen::Success)
             abort(); // Handle failure
 
-        // Step 4: Sort eigenvectors by eigenvalues (in descending order)
+        // Sort eigenvectors by eigenvalues (in descending order)
         Eigen::MatrixXf eigenvectors = eigenSolver.eigenvectors();
         // This step assumes eigenvectors are already sorted by eigenvalues in
         // descending order
 
-        // Step 5: Pick the top 'numComponents' eigenvectors
+        // Pick the top 'numComponents' eigenvectors
         Eigen::MatrixXf principalComponents =
             eigenvectors.rightCols(numComponents);
 
-        // Step 6: Transform the original centered data
+        // Transform the original centered data
         Eigen::MatrixXf transformedData = ssdfCentered * principalComponents;
 
-        // Return the transformed data in integer form (if necessary, adjust
-        // based on your needs)
+        // Return the transformed data in integer form
         return transformedData;
     }
 
@@ -103,13 +105,10 @@ public:
     computeDistanceToNearestOcclusion(int x, int y,
                                       const Eigen::MatrixXi &visibilityImage)
     {
-        // Placeholder for distance computation. You might implement a search
-        // algorithm here that looks for the nearest pixel with a different
-        // visibility value. For simplicity, let's assume a naive approach:
+        // distance computation
         int shortestDistance = INT_MAX; // Use a large initial value
 
-        // Scan through the entire image (this can be highly inefficient and is
-        // just illustrative)
+        // Scan through the entire image to find the nearest occluded pixel
         for (int i = 0; i < visibilityImage.rows(); ++i)
         {
             for (int j = 0; j < visibilityImage.cols(); ++j)
@@ -136,7 +135,7 @@ public:
         y = y + 1;
         static_cast<void>(visibilityImage);
 
-        return -1; // Example placeholder value
+        return -1;
     }
 
     Eigen::MatrixXi
@@ -176,52 +175,38 @@ public:
     Spectrum convertToSpectrum(const Eigen::MatrixXf &compressedSSDF)
     {
         double sum = compressedSSDF.sum();
-        double maxPossibleValue =
-            compressedSSDF.size() * 255.0; // Assuming 255 as the max SSDF value
+        double maxPossibleValue = compressedSSDF.size() * 255.0;
         double normalizedSum = sum / maxPossibleValue;
 
-        // Assuming Spectrum can be constructed from a single scalar value,
-        // or you have a way to convert a scalar value to Spectrum.
-        Spectrum spectrumValue =
-            normalizedSum; // Make sure Spectrum can be initialized like this
+        // Assuming Spectrum can be constructed from a single scalar value
+        Spectrum spectrumValue = normalizedSum;
 
         return spectrumValue;
     }
 
     Spectrum compute_ssdf(const Vector3f &omega, const float &k)
     {
-        // Step 1: Locate the nearest copy of the exemplar block
-        // This step is conceptual and depends on your scene setup
+        // Locate the nearest copy of the exemplar block
         static_cast<void>(omega);
         static_cast<void>(k);
-        // Step 2: Render a 128x128 binary visibility image
+        // Render a 128x128 binary visibility image
         Eigen::MatrixXi visibility_image(128, 128);
-        // Assuming you have a method to perform ray casting and determine
-        // visibility This will require iterating over the sphere's
-        // parameterization (theta, phi) and casting rays to determine
-        // visibility
+        // perform ray casting and determine
         for (int theta_idx = 0; theta_idx < 128; ++theta_idx)
         {
             for (int phi_idx = 0; phi_idx < 128; ++phi_idx)
             {
                 // Compute theta and phi for the current pixel
                 // Cast a ray in this direction and determine visibility
-                bool visible =
-                    true /* Perform ray casting to check visibility */;
+                bool visible = true;
                 visibility_image(theta_idx, phi_idx) = visible ? 1 : 0;
             }
         }
 
-        // Step 3: Compute the SSDF from the visibility image
-        // This involves finding for each pixel the closest pixel having the
-        // opposite value and could be implemented as a separate function
+        // Compute the SSDF from the visibility image
         Eigen::MatrixXi ssdf = computeSSDFFromVisibilityImage(visibility_image);
 
-        // Step 4: Compress the SSDF using PCA
-        // Assuming you have a PCA implementation or a library like Eigen that
-        // can perform PCA The number of principal components to retain is
-        // mentioned as 48 in the paper
-        // Change the declaration of compressed_ssdf to Eigen::MatrixXf
+        // Compress the SSDF using PCA
         Eigen::MatrixXf compressed_ssdf =
             pcaCompressSSDF(ssdf.cast<float>(), 48);
 
@@ -234,19 +219,14 @@ public:
 
     Spectrum compute_sg(const Vector3f &omega, const float &k)
     {
-        // SG axis - This should be based on the fabric's micro-geometry and
-        // light interaction For simplicity, using a placeholder axis. You'll
-        // need to compute this based on your fabric model.
+        // SG axis
         Vector3f sg_axis = Vector3f(0.0f, 1.0f, 0.0f);
         static_cast<void>(k);
-        // SG sharpness - This value should be determined based on the light's
-        // interaction with the fabric Using a placeholder value. Adjust this
-        // based on your specific requirements.
+        // SG sharpness
         float sg_sharpness = 100.0f;
 
         // Compute the SG contribution using the formula G(omega; xi, lambda) =
-        // exp(lambda(omega . xi - 1)) Assuming 'omega' is normalized and
-        // 'sg_axis' is the direction of SG (xi in the formula)
+        // exp(lambda(omega . xi - 1))
         auto dot_product = dot(omega, sg_axis);
         Spectrum sg_contribution = exp(sg_sharpness * (dot_product - 1.0f));
 
@@ -325,10 +305,7 @@ public:
         Spectrum weight(0.f);
         if constexpr (is_polarized_v<Spectrum>)
         {
-            /* Due to the coordinate system rotations for polarization-aware
-               pBSDFs below we need to know the propagation direction of light.
-               In the following, light arrives along `-wo_hat` and leaves along
-               `+wi_hat`. */
+
             Vector3f wo_hat =
                          ctx.mode == TransportMode::Radiance ? bs.wo : si.wi,
                      wi_hat =
@@ -443,15 +420,6 @@ public:
     {
         static_cast<void>(si);
         static_cast<void>(wo);
-        // Placeholder for IIRTF computation logic
-        // This will depend on how you've precomputed and stored the IIRTF data
-        // For simplicity, this example assumes a generic approach
-
-        // Example: Retrieve IIRTF data based on the surface interaction details
-        // (e.g., position, normal) and the outgoing direction 'wo'
-
-        // This is highly simplified and would need to be replaced with actual
-        // IIRTF data retrieval and application logic
         Spectrum iirtfContribution = Spectrum(0.0f);
 
         return iirtfContribution;
